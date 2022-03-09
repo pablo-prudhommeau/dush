@@ -1,0 +1,7 @@
+google-api-python-client
+google_auth_oauthlib
+google-cloud-vision
+google-cloud-storage
+invoice2data
+borb
+coloredlogs

@@ -1,0 +1,19 @@
+image: docker:stable
+
+variables:
+  DOCKER_HOST: tcp://docker:2375/
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+
+services:
+  - docker:dind
+
+stages:
+  - deploy
+
+deploy-docker:
+  stage: deploy
+  script:
+    - docker login -u $DOCKER_REPOSITORY_USERNAME -p $DOCKER_REPOSITORY_PASSWORD docker.nexus.nash.n3xus.xyz
+    - docker build -t docker.nexus.nash.n3xus.xyz/dush .
+    - docker push docker.nexus.nash.n3xus.xyz/dush
