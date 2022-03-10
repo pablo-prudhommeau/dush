@@ -3,10 +3,12 @@ from __future__ import (unicode_literals, absolute_import, print_function, divis
 import base64
 import configparser
 import datetime
+import getopt
 import io
 import logging
 import os
 import re
+import sys
 from time import sleep
 
 import coloredlogs
@@ -17,6 +19,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+from humanfriendly.terminal import usage
 
 
 def authenticate():
@@ -69,8 +72,9 @@ def list_invoice_emails():
                                                                  id=message['payload']['parts'][1]['body'][
                                                                      'attachmentId']).execute()
             logging.info('Get message details from Gmail - messageId [' + message['id'] + ']')
-            attachment = bytearray(base64.urlsafe_b64decode(invoice['data'].encode('UTF-8')))
-            filename = compute_invoice_filename(attachment)
+            attachment = base64.urlsafe_b64decode(invoice['data'].encode('UTF-8'))
+            attachment_byte_array = bytearray(attachment)
+            filename = compute_invoice_filename('', attachment_byte_array)
             upload_file_to_google_drive(attachment, filename)
             config = get_config()
             gmail.users().messages().modify(id=msg_id['id'], userId='me',
@@ -80,51 +84,87 @@ def list_invoice_emails():
         logging.debug('No eligible email found')
 
 
-def compute_invoice_filename(attachment_byte_array):
+def compute_invoice_filename(original_file_name, attachment_byte_array):
     simple_text_extraction = SimpleTextExtraction()
-    PDF.loads(io.BytesIO(attachment_byte_array), [simple_text_extraction])
-    index = 0
+    try:
+        PDF.loads(io.BytesIO(attachment_byte_array), [simple_text_extraction])
+    except AssertionError:
+        logging.error('Unable to read PDF - originalFileName [' + original_file_name + ']')
+        return
+
+    page_index = 0
     line_groups = []
     last_item = {}
     invoice_total_ttc = None
-    invoice_date = None
+    formatted_invoice_date = None
     invoice_id = None
-    while index <= simple_text_extraction._current_page:
-        lines = simple_text_extraction.get_text_for_page(index).split('\n')
-        for line in lines:
-            match_item_line = re.match('^([0-9]+) ([0-9]{8}) (.*?)( Tx TVA .*?)?$', line)
+    is_credit = False
+    while page_index <= simple_text_extraction._current_page:
+        lines = simple_text_extraction.get_text_for_page(page_index).split('\n')
+        for line_index, line in enumerate(lines):
+            match_item_line = re.match(
+                '^([0-9]+) ([0-9]{8}) (.*?)( -?[0-9]+\.?([0-9]+)? -?[0-9]+\.?([0-9]+)? -?[0-9]+\.?([0-9]+)? (-?[0-9]+\.?([0-9]+)?))?( Tx TVA .*?)?$',
+                line)
             if match_item_line:
                 item_id = match_item_line.group(2)
                 item_designation = match_item_line.group(3)
-                last_item = {'id': item_id, 'designation': item_designation, 'total_price': -1}
+                total_price = -1
+                if match_item_line.group(4) is not None:
+                    total_price = abs(float(match_item_line.group(8)))
+                last_item = {'id': item_id, 'designation': item_designation, 'total_price': total_price}
                 line_groups.append(last_item)
-            match_price_line = re.match('^(-?[0-9]+\.[0-9]+) € (-?[0-9]+\.[0-9]+) € ([0-9]+) (-?[0-9]+\.[0-9]+) €',
-                                        line)
+            match_price_line = re.match(
+                '^-?[0-9]+\.?([0-9]+)? €? -?[0-9]+\.?([0-9]+)? €? -?[0-9]+\.?([0-9]+)? (-?[0-9]+\.?([0-9]+)?) €?',
+                line)
             if match_price_line:
-                last_item['total_price'] = float(match_price_line.group(4))
+                last_item['total_price'] = abs(float(match_price_line.group(4)))
             match_invoice_total_ttc = re.match('^Total TTC (-?[0-9]+\.[0-9]+) €$', line)
             if match_invoice_total_ttc:
-                invoice_total_ttc = float(match_invoice_total_ttc.group(1))
-            match_invoice_date = re.match('^Exemplaire client / Date d\'émission : (.*?)$', line)
+                invoice_total_ttc = abs(float(match_invoice_total_ttc.group(1)))
+            match_invoice_total_ttc_single = re.match('^Total TTC$', line)
+            if match_invoice_total_ttc_single:
+                invoice_total_ttc_line = lines[line_index - 10]
+                if is_number(invoice_total_ttc_line):
+                    invoice_total_ttc = abs(float(lines[line_index - 10]))
+                else:
+                    logging.warning(
+                        'Invoice has invalid Total TTC amount - originalFileName [' + original_file_name + ']')
+            match_invoice_date = re.match('^(.*?)([0-9]+/[0-9]+/[0-9]+)$', line)
             if match_invoice_date:
-                invoice_date = datetime.datetime.strptime(match_invoice_date.group(1), '%d/%m/%Y')
-            match_invoice_id = re.match('(AVOIR|FACTURE) N° ([0-9]+)', line)
+                invoice_date = datetime.datetime.strptime(match_invoice_date.group(2), '%d/%m/%Y')
+                formatted_invoice_date = invoice_date.strftime('%Y_%m_%d')
+            match_invoice_id = re.match('((AVOIR )|FACTURE )(.*?)([0-9]+)( DUPLICATA)?', line)
             if match_invoice_id:
-                invoice_id = match_invoice_id.group(2)
-        index += 1
+                invoice_id = match_invoice_id.group(4)
+                if match_invoice_id.group(2) is not None:
+                    is_credit = True
+        page_index += 1
     line_groups = sorted(line_groups, key=lambda x: x['total_price'], reverse=True)
-    pdf_name = 'Leroy Merlin - ' + invoice_date.strftime('%Y_%m_%d') + ' - ' + invoice_id + ' - ' \
-               + str(invoice_total_ttc) + '€ ('
-    index = 0
-    item_details_number = len(line_groups) if len(line_groups) < 3 else 3
-    while index < item_details_number:
-        pdf_name += line_groups[index]['designation'] + ' - ' + str(line_groups[index]['total_price']) + '€'
-        if index < item_details_number - 1:
-            pdf_name += ' | '
-        index += 1
-    if len(line_groups) > 3:
-        pdf_name += ', ...'
-    pdf_name += ').pdf'
+    pdf_name = 'Leroy Merlin'
+    if formatted_invoice_date is not None:
+        pdf_name += ' - ' + formatted_invoice_date
+    if invoice_id is not None:
+        pdf_name += ' - ' + invoice_id
+    if is_credit is True:
+        pdf_name += ' - Avoir'
+    if invoice_total_ttc is not None:
+        pdf_name += ' - ' + str(invoice_total_ttc) + '€'
+    if len(line_groups) > 0:
+        pdf_name += ' ('
+        page_index = 0
+        item_details_number = len(line_groups) if len(line_groups) < 3 else 3
+        while page_index < item_details_number:
+            pdf_name += line_groups[page_index]['designation'] + ' - ' + str(
+                line_groups[page_index]['total_price']) + '€'
+            if page_index < item_details_number - 1:
+                pdf_name += ' | '
+            page_index += 1
+        if len(line_groups) > 3:
+            pdf_name += ', ...'
+        pdf_name += ')'
+    if formatted_invoice_date is None and invoice_id is None and is_credit is False and invoice_total_ttc is None:
+        pdf_name += ' - @Non catégorisé'
+    pdf_name += '.pdf'
     return pdf_name
 
 
@@ -134,16 +174,57 @@ def get_config():
     return config
 
 
+def is_number(s):
+    try:
+        complex(s)
+    except ValueError:
+        return False
+    return True
+
+
+def launch_email_box_scanner():
+    config = get_config()
+    logging.info('Starting email box scanner scheduler every ' + config['default']['SchedulerIntervalInSeconds'] + ' seconds...')
+
+    while True:
+        list_invoice_emails()
+        sleep(int(config['default']['SchedulerIntervalInSeconds']))
+
+
+def launch_manual_invoice_upload():
+    logging.info('Starting manual invoice upload...')
+
+    for filename in os.listdir('invoices'):
+        with open(os.path.join('invoices', filename), "rb") as f:
+            content = bytearray(f.read())
+            filename = compute_invoice_filename(filename, content)
+            if filename is not None:
+                upload_file_to_google_drive(content, filename)
+
+
+def usage():
+    print('Usage: ' + sys.argv[0] + ' [--manual]')
+
+
+def main(argv):
+    try:
+        opts, args = getopt.getopt(argv, "hg:d", ["help", "manual"])
+    except getopt.GetoptError:
+        usage()
+        sys.exit(2)
+    for opt, arg in opts:
+        if opt in ("-h", "--help"):
+            usage()
+            sys.exit()
+        elif opt in ("-m", "--manual"):
+            launch_manual_invoice_upload()
+            return
+    launch_email_box_scanner()
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.ERROR)
     coloredlogs.install()
 
-    logging.info('Starting dush...')
-
-    config = get_config()
-    logging.info('Starting scanner scheduler every ' + config['default']['SchedulerIntervalInSeconds'] + ' seconds...')
-
-    while True:
-        list_invoice_emails()
-        sleep(int(config['default']['SchedulerIntervalInSeconds']))
+    main(sys.argv[1:])
