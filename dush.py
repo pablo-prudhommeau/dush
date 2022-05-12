@@ -79,7 +79,7 @@ def list_invoice_emails():
             config = get_config()
             gmail.users().messages().modify(id=msg_id['id'], userId='me',
                                             body={'addLabelIds': [config['google.gmail']['ArchiveLabelId']],
-                                                  'removeLabelIds': ['INBOX']}).execute()
+                                                  'removeLabelIds': ['INBOX', 'UNREAD']}).execute()
     else:
         logging.debug('No eligible email found')
 
