@@ -62,7 +62,7 @@ def upload_file_to_google_drive(attachment, filename):
 def list_invoice_emails():
     credentials = authenticate()
     gmail = build('gmail', 'v1', credentials=credentials)
-    response = gmail.users().messages().list(q='facture has:attachment in:inbox', userId='me').execute()
+    response = gmail.users().messages().list(q='facture from:leroymerlin.fr has:attachment in:inbox', userId='me').execute()
 
     logging.debug('Scanning eligible emails containing Leroy Merlin invoice...')
     if 'messages' in response:
