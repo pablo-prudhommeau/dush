@@ -5,6 +5,7 @@ import configparser
 import datetime
 import getopt
 import io
+import json
 import logging
 import os
 import re
@@ -12,6 +13,7 @@ import sys
 from time import sleep
 
 import coloredlogs
+import requests
 from borb.pdf.pdf import PDF
 from borb.toolkit.text.simple_text_extraction import SimpleTextExtraction
 from google.auth.transport.requests import Request
@@ -182,13 +184,61 @@ def is_number(s):
     return True
 
 
+def launch_api_scanner():
+    config = get_config()
+    logging.info(
+        'Starting API scanner scheduler every ' + config['default']['ApiSchedulerIntervalInSeconds'] + ' seconds...')
+
+    s = requests.session()
+    data = {
+        'client_id': "mwuEYVQmdT0MhwPsvUxA",
+        'email': "pablo.prudhommeau@gmail.com",
+        'password': "G2kc6$i9g7bRC6OU#Ko#",
+        'scope': "openid profile email offline_access address events phone full_write LMFR.MOVE.CUSTOMER PickupPlanning.appointments community shortenUrl:write LMFR.MOVE.SALES LMFR.MOVE.LOYALTY FRLM-WAC.rw-partner-creds shortenUrl:read move SCOPE_CUSTOMER customer:management webuser:read webuser:write"
+    }
+    url = "https://authentication.leroymerlin.fr/identity/v1/password/login"
+    r = s.post(url, data=data)
+    y = json.loads(r.content)
+    r3 = s.get(
+        'https://authentication.leroymerlin.fr/identity/v1/password/callback' +
+        '?client_id=mwuEYVQmdT0MhwPsvUxA&response_type=code'
+        + '&scope=openid%20profile%20email%20offline_access%20address%20events%20phone%20full_write%20LMFR.MOVE.CUSTOMER%20PickupPlanning.appointments%20community%20shortenUrl%3Awrite%20LMFR.MOVE.SALES%20LMFR.MOVE.LOYALTY%20FRLM-WAC.rw-partner-creds%20shortenUrl%3Aread%20move%20SCOPE_CUSTOMER%20customer%3Amanagement%20webuser%3Aread%20webuser%3Awrite'
+        + '&state=' + 'c3RhdGU9OWZ1cTMzbWU1RURkVTNMakRwMlFvcDlBS0Q5YnRMbTJwU19ma2tYTmVvYz0mY2xpZW50X2lkPW13dUVZVlFtZFQwTWh3UHN2VXhBJnJlZGlyZWN0X3VyaT1odHRwczovL3d3dy5sZXJveW1lcmxpbi5mci9hdXRoZW50aWNhdGlvbi9vYXV0aDIvY2FsbGJhY2smc2NvcGU9b3BlbmlkIHByb2ZpbGUgZW1haWwgb2ZmbGluZV9hY2Nlc3MgYWRkcmVzcyBldmVudHMgcGhvbmUgZnVsbF93cml0ZSBMTUZSLk1PVkUuQ1VTVE9NRVIgUGlja3VwUGxhbm5pbmcuYXBwb2ludG1lbnRzIGNvbW11bml0eSBzaG9ydGVuVXJsOndyaXRlIExNRlIuTU9WRS5TQUxFUyBMTUZSLk1PVkUuTE9ZQUxUWSBGUkxNLVdBQy5ydy1wYXJ0bmVyLWNyZWRzIHNob3J0ZW5Vcmw6cmVhZCBtb3ZlIFNDT1BFX0NVU1RPTUVSIGN1c3RvbWVyOm1hbmFnZW1lbnQgd2VidXNlcjpyZWFkIHdlYnVzZXI6d3JpdGU='
+        + '&redirect_uri=https%3A%2F%2Fwww.leroymerlin.fr%2Fauthentication%2Foauth2%2Fcallback'
+        + '&tkn=' + y['tkn'],
+        allow_redirects=False,
+        headers={
+            'accept-language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36'
+        })
+    logging.info(r3.next.url)
+    r4 = s.get(r3.next.url,
+               headers={
+                   'accept-language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+                   'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36'
+               })
+    r2 = s.get(
+        'https://www.leroymerlin.fr/customer-space-module/services/customer-after-sales-backend/me/receipts?page=0&size=10&yearOffset=0',
+        headers={
+            'accept-language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36'
+        })
+    logging.info(r2.content)
+
+
+# while True:
+#    list_invoice_emails()
+#    sleep(int(config['default']['ApiSchedulerIntervalInSeconds']))
+
+
 def launch_email_box_scanner():
     config = get_config()
-    logging.info('Starting email box scanner scheduler every ' + config['default']['SchedulerIntervalInSeconds'] + ' seconds...')
+    logging.info('Starting email box scanner scheduler every ' + config['default'][
+        'GmailSchedulerIntervalInSeconds'] + ' seconds...')
 
     while True:
         list_invoice_emails()
-        sleep(int(config['default']['SchedulerIntervalInSeconds']))
+        sleep(int(config['default']['GmailSchedulerIntervalInSeconds']))
 
 
 def launch_manual_invoice_upload():
@@ -203,12 +253,12 @@ def launch_manual_invoice_upload():
 
 
 def usage():
-    print('Usage: ' + sys.argv[0] + ' [--manual]')
+    print('Usage: ' + sys.argv[0] + ' [--mode MANUAL|GMAIL|API]')
 
 
 def main(argv):
     try:
-        opts, args = getopt.getopt(argv, "hg:d", ["help", "manual"])
+        opts, args = getopt.getopt(argv, "hm:", ["help", "mode"])
     except getopt.GetoptError:
         usage()
         sys.exit(2)
@@ -216,10 +266,21 @@ def main(argv):
         if opt in ("-h", "--help"):
             usage()
             sys.exit()
-        elif opt in ("-m", "--manual"):
-            launch_manual_invoice_upload()
-            return
-    launch_email_box_scanner()
+        elif opt in ("-m", "--mode"):
+            if arg == 'API':
+                launch_api_scanner()
+                return
+            elif arg == 'MANUAL':
+                launch_manual_invoice_upload()
+                return
+            elif arg == 'GMAIL':
+                launch_email_box_scanner()
+                return
+            else:
+                usage()
+                return
+    usage()
+    return
 
 
 if __name__ == '__main__':
