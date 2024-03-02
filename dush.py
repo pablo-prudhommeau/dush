@@ -1,6 +1,7 @@
 from __future__ import (unicode_literals, absolute_import, print_function, division)
 
 import base64
+import coloredlogs
 import configparser
 import datetime
 import getopt
@@ -8,10 +9,9 @@ import io
 import logging
 import os
 import re
+import shutil
 import sys
-from time import sleep
 
-import coloredlogs
 from borb.pdf.pdf import PDF
 from borb.toolkit.text.simple_text_extraction import SimpleTextExtraction
 from google.auth.transport.requests import Request
@@ -20,6 +20,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from humanfriendly.terminal import usage
+from time import sleep
 
 
 def authenticate():
@@ -68,18 +69,24 @@ def list_invoice_emails():
     if 'messages' in response:
         for msg_id in response['messages']:
             message = gmail.users().messages().get(id=msg_id['id'], userId='me').execute()
-            invoice = gmail.users().messages().attachments().get(userId='me', messageId=message['id'],
-                                                                 id=message['payload']['parts'][1]['body'][
-                                                                     'attachmentId']).execute()
+            invoice = (gmail.users().messages().attachments()
+                       .get(userId='me',
+                            messageId=message['id'],
+                            id=message['payload']['parts'][1]['body']['attachmentId'])
+                       .execute())
             logging.info('Get message details from Gmail - messageId [' + message['id'] + ']')
             attachment = base64.urlsafe_b64decode(invoice['data'].encode('UTF-8'))
             attachment_byte_array = bytearray(attachment)
             filename = compute_invoice_filename('', attachment_byte_array)
             upload_file_to_google_drive(attachment, filename)
             config = get_config()
-            gmail.users().messages().modify(id=msg_id['id'], userId='me',
-                                            body={'addLabelIds': [config['google.gmail']['ArchiveLabelId']],
-                                                  'removeLabelIds': ['INBOX', 'UNREAD']}).execute()
+            (gmail.users().messages().modify(id=msg_id['id'],
+                                             userId='me',
+                                             body={
+                                                 'addLabelIds': [config['google.gmail']['ArchiveLabelId']],
+                                                 'removeLabelIds': ['INBOX', 'UNREAD']
+                                             })
+             .execute())
     else:
         logging.debug('No eligible email found')
 
@@ -103,7 +110,7 @@ def compute_invoice_filename(original_file_name, attachment_byte_array):
         lines = simple_text_extraction.get_text_for_page(page_index).split('\n')
         for line_index, line in enumerate(lines):
             match_item_line = re.match(
-                '^([0-9]+) ([0-9]{8}) (.*?)( -?[0-9]+\.?([0-9]+)? -?[0-9]+\.?([0-9]+)? -?[0-9]+\.?([0-9]+)? (-?[0-9]+\.?([0-9]+)?))?( Tx TVA .*?)?$',
+                '^([0-9]+) ([0-9]{8}) (.*?)( -?[0-9]+\\.?([0-9]+)? -?[0-9]+\\.?([0-9]+)? -?[0-9]+\\.?([0-9]+)? (-?[0-9]+\\.?([0-9]+)?))?( Tx TVA .*?)?$',
                 line)
             if match_item_line:
                 item_id = match_item_line.group(2)
@@ -114,11 +121,11 @@ def compute_invoice_filename(original_file_name, attachment_byte_array):
                 last_item = {'id': item_id, 'designation': item_designation, 'total_price': total_price}
                 line_groups.append(last_item)
             match_price_line = re.match(
-                '^-?[0-9]+\.?([0-9]+)? €? -?[0-9]+\.?([0-9]+)? €? -?[0-9]+\.?([0-9]+)? (-?[0-9]+\.?([0-9]+)?) €?',
+                '^-?[0-9]+\\.?([0-9]+)? €? -?[0-9]+\\.?([0-9]+)? €? -?[0-9]+\\.?([0-9]+)? (-?[0-9]+\\.?([0-9]+)?) €?',
                 line)
             if match_price_line:
                 last_item['total_price'] = abs(float(match_price_line.group(4)))
-            match_invoice_total_ttc = re.match('^Total TTC (-?[0-9]+\.[0-9]+) €$', line)
+            match_invoice_total_ttc = re.match('^Total TTC (-?[0-9]+\\.[0-9]+) €$', line)
             if match_invoice_total_ttc:
                 invoice_total_ttc = abs(float(match_invoice_total_ttc.group(1)))
             match_invoice_total_ttc_single = re.match('^Total TTC$', line)
@@ -194,27 +201,27 @@ def launch_email_box_scanner():
 def launch_manual_invoice_upload():
     logging.info('Starting manual invoice upload...')
 
-    for filename in os.listdir('invoices'):
+    if not os.path.exists('invoices/processed'):
+        os.mkdir('invoices/processed')
+
+    for filename in [f for f in os.listdir('invoices') if os.path.isfile(os.path.join('invoices', f))]:
         with open(os.path.join('invoices', filename), "rb") as f:
             content = bytearray(f.read())
-            filename = compute_invoice_filename(filename, content)
-            if filename is not None:
-                upload_file_to_google_drive(content, filename)
-
-
-def usage():
-    print('Usage: ' + sys.argv[0] + ' [--manual]')
+            google_drive_filename = compute_invoice_filename(filename, content)
+            if google_drive_filename is not None:
+                upload_file_to_google_drive(content, google_drive_filename)
+        shutil.move(os.path.join('invoices', filename), os.path.join('invoices/processed', filename))
 
 
 def main(argv):
     try:
         opts, args = getopt.getopt(argv, "hg:d", ["help", "manual"])
     except getopt.GetoptError:
-        usage()
+        usage('Usage: ' + sys.argv[0] + ' [--manual]')
         sys.exit(2)
     for opt, arg in opts:
         if opt in ("-h", "--help"):
-            usage()
+            usage('Usage: ' + sys.argv[0] + ' [--manual]')
             sys.exit()
         elif opt in ("-m", "--manual"):
             launch_manual_invoice_upload()
