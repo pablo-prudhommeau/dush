@@ -18,7 +18,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from humanfriendly.terminal import usage
 from time import sleep
 
@@ -60,7 +60,7 @@ def upload_file_to_google_drive(attachment, filename):
     logging.info('File successfully uploaded to Google Drive - filename [' + filename + ']')
 
 
-def list_invoice_emails():
+def handle_invoice_emails():
     credentials = authenticate()
     gmail = build('gmail', 'v1', credentials=credentials)
     response = gmail.users().messages().list(q='facture from:leroymerlin.fr has:attachment in:inbox', userId='me').execute()
@@ -189,12 +189,13 @@ def is_number(s):
     return True
 
 
-def launch_email_box_scanner():
+def launch_invoice_scanner():
     config = get_config()
-    logging.info('Starting email box scanner scheduler every ' + config['default']['SchedulerIntervalInSeconds'] + ' seconds...')
+    logging.info('Starting invoice scanner scheduler every ' + config['default']['SchedulerIntervalInSeconds'] + ' seconds...')
 
     while True:
-        list_invoice_emails()
+        handle_invoice_emails()
+        handle_google_drive_files()
         sleep(int(config['default']['SchedulerIntervalInSeconds']))
 
 
@@ -213,6 +214,45 @@ def launch_manual_invoice_upload():
         shutil.move(os.path.join('invoices', filename), os.path.join('invoices/processed', filename))
 
 
+def handle_google_drive_files():
+    config = get_config()
+    credentials = authenticate()
+    drive = build("drive", "v3", credentials=credentials)
+    files = []
+    page_token = None
+    while True:
+        response = (
+            drive.files().list(
+                q="mimeType='application/pdf' and '" + config['google.drive']['ManualUploadParentFolderId'] + "' in parents",
+                spaces="drive",
+                fields="nextPageToken, files(id, name)",
+                pageToken=page_token,
+            )
+            .execute()
+        )
+        for file in response.get("files", []):
+            logging.info(f'Found manually uploaded invoice in Google Drive folder - fileName [{file.get("name")}], fileId [{file.get("id")}]')
+            request = drive.files().get_media(fileId=file.get("id"))
+            file_io = io.BytesIO()
+            downloader = MediaIoBaseDownload(file_io, request)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+            invoice_file_name = compute_invoice_filename(file.get("name"), file_io.getvalue())
+            drive.files().update(
+                fileId=file.get("id"),
+                addParents=config['google.drive']['ParentFolderId'],
+                removeParents=config['google.drive']['ManualUploadParentFolderId'],
+                fields='id, parents'
+            ).execute()
+            drive.files().update(fileId=file.get("id"), body={'name': invoice_file_name}).execute()
+            logging.info(f'Successfully moved invoice in Google Drive folder - fileName [{invoice_file_name}]')
+        files.extend(response.get("files", []))
+        page_token = response.get("nextPageToken", None)
+        if page_token is None:
+            break
+
+
 def main(argv):
     try:
         opts, args = getopt.getopt(argv, "hg:d", ["help", "manual"])
@@ -226,7 +266,7 @@ def main(argv):
         elif opt in ("-m", "--manual"):
             launch_manual_invoice_upload()
             return
-    launch_email_box_scanner()
+    launch_invoice_scanner()
 
 
 if __name__ == '__main__':
